@@ -10,11 +10,11 @@
 (function(global) {
 	var defaultConfig = {
 		codec: {
-			sampleRate: 24000,
+			sampleRate: 24000, // original = 24000
 			channels: 1,
-			app: 2048,
+			app: 2048, // original = 2048
 			frameDuration: 20,
-			bufferSize: 4096
+			bufferSize: 4096 // original = 4096
 		},
 		server: {
 			host: window.location.hostname,
@@ -25,7 +25,8 @@
 	var audioContext = new(window.AudioContext || window.webkitAudioContext)();
 
 	var WSAudioAPI = global.WSAudioAPI = {
-		Player: function(config, socket) {
+		//Player: function(config, socket) {
+		  Player: function(socket) {
 			this.config = {};
 			this.config.codec = this.config.codec || defaultConfig.codec;
 			this.config.server = this.config.server || defaultConfig.server;
@@ -33,12 +34,17 @@
 			this.parentSocket = socket;
 			this.decoder = new OpusDecoder(this.config.codec.sampleRate, this.config.codec.channels);
 			this.silence = new Float32Array(this.config.codec.bufferSize);
+			console.log("PLAYER WITH CONFIG: ",this.config)
 		},
-		Streamer: function(config, socket) {
-			navigator.getUserMedia = (navigator.getUserMedia ||
+		// Streamer: function(config, socket) {
+		Streamer: function(socket) {
+			navigator.getUserMedia = (
+				navigator.getUserMedia ||
 				navigator.webkitGetUserMedia ||
 				navigator.mozGetUserMedia ||
-				navigator.msGetUserMedia);
+				navigator.msGetUserMedia ||
+				navigator.mediaDevices.getUserMedia
+			);
 
 			this.config = {};
 			this.config.codec = this.config.codec || defaultConfig.codec;
@@ -57,7 +63,9 @@
 						var resampled = _this.sampler.resampler(e.inputBuffer.getChannelData(0));
 						var packets = _this.encoder.encode_float(resampled);
 						for (var i = 0; i < packets.length; i++) {
-							if (_this.socket.readyState == 1) _this.socket.send(packets[i]);
+							//if (_this.socket.readyState == 1) _this.socket.send(packets[i]);
+							if (_this.socket.connected) _this.socket.emit('speak', {array:packets[i]});
+							console.log(packets[i]);
 						}
 					};
 					_this.audioInput.connect(_this.gainNode);
@@ -72,47 +80,25 @@
 		var _this = this;
 
 		if (!this.parentSocket) {
-			this.socket = new WebSocket('wss://' + this.config.server.host + ':' + this.config.server.port);
+			//this.socket = new WebSocket('wss://' + this.config.server.host + ':' + this.config.server.port);
 		} else {
 			this.socket = this.parentSocket;
 		}
 
 		this.socket.binaryType = 'arraybuffer';
-
-		if (this.socket.readyState == WebSocket.OPEN) {
+		// this.socket.readyState == WebSocket.OPEN
+		if (this.socket.connected) {
 			this._makeStream(onError);
-		} else if (this.socket.readyState == WebSocket.CONNECTING) {
-			var _onopen = this.socket.onopen;
-			this.socket.onopen = function() {
-				if (_onopen) {
-					_onopen();
-				}
-				_this._makeStream(onError);
-			}
-		} else {
+		}
+		else {
 			console.error('Socket is in CLOSED state');
 		}
 
-		var _onclose = this.socket.onclose;
-		this.socket.onclose = function() {
-			if (_onclose) {
-				_onclose();
-			}
-			if (_this.audioInput) {
-				_this.audioInput.disconnect();
-				_this.audioInput = null;
-			}
-			if (_this.gainNode) {
-				_this.gainNode.disconnect();
-				_this.gainNode = null;
-			}
-			if (_this.recorder) {
-				_this.recorder.disconnect();
-				_this.recorder = null;
-			}
-			_this.stream.getTracks()[0].stop();
-			console.log('Disconnected from server');
-		};
+		//var _onclose = this.socket.onclose;
+		var _onclose = function(){
+			this.socket.emit('disconnect');
+			// TODO: take out disconnect event
+		}
 	};
 
 	WSAudioAPI.Streamer.prototype.mute = function() {
@@ -147,7 +133,9 @@
 		this.stream.getTracks()[0].stop()
 
 		if (!this.parentSocket) {
-			this.socket.close();
+			//this.socket.close();
+			this.socket.emit('disconnect')
+			// TODO: remove disconnect event
 		}
 	};
 
@@ -190,53 +178,35 @@
 		this.gainNode.connect(audioContext.destination);
 
 		if (!this.parentSocket) {
-			this.socket = new WebSocket('wss://' + this.config.server.host + ':' + this.config.server.port);
+			//this.socket = new WebSocket('wss://' + this.config.server.host + ':' + this.config.server.port);
 		} else {
 			this.socket = this.parentSocket;
 		}
-        //this.socket.onopen = function () {
-        //    console.log('Connected to server ' + _this.config.server.host + ' as listener');
-        //};
-        var _onmessage = this.parentOnmessage = this.socket.onmessage;
-        this.socket.onmessage = function(message) {
-        	if (_onmessage) {
-        		_onmessage(message);
-        	}
-        	if (message.data instanceof Blob) {
-        		var reader = new FileReader();
-        		reader.onload = function() {
-        			_this.audioQueue.write(_this.decoder.decode_float(reader.result));
-        		};
-        		reader.readAsArrayBuffer(message.data);
-        	}
-        };
-        //this.socket.onclose = function () {
-        //    console.log('Connection to server closed');
-        //};
-        //this.socket.onerror = function (err) {
-        //    console.log('Getting audio data error:', err);
-        //};
-      };
+	  this.socket.on('getSpeak', function(message, callback){
+		  _this.audioQueue.write(_this.decoder.decode_float(message.array));
+			console.log(message.array);
+    });
+  }
 
-      WSAudioAPI.Player.prototype.getVolume = function() {
-      	return this.gainNode ? this.gainNode.gain.value : 'Stream not started yet';
-      };
+  WSAudioAPI.Player.prototype.getVolume = function() {
+  	return this.gainNode ? this.gainNode.gain.value : 'Stream not started yet';
+  };
 
-      WSAudioAPI.Player.prototype.setVolume = function(value) {
-      	if (this.gainNode) this.gainNode.gain.value = value;
-      };
+  WSAudioAPI.Player.prototype.setVolume = function(value) {
+  	if (this.gainNode) this.gainNode.gain.value = value;
+  };
 
-      WSAudioAPI.Player.prototype.stop = function() {
-      	this.audioQueue = null;
-      	this.scriptNode.disconnect();
-      	this.scriptNode = null;
-      	this.gainNode.disconnect();
-      	this.gainNode = null;
-
-      	if (!this.parentSocket) {
-      		this.socket.close();
-      	} else {
-      		this.socket.onmessage = this.parentOnmessage;
-      	}
-      };
-    })(window);
+  WSAudioAPI.Player.prototype.stop = function() {
+  	this.audioQueue = null;
+  	this.scriptNode.disconnect();
+  	this.scriptNode = null;
+  	this.gainNode.disconnect();
+  	this.gainNode = null;
+		this.socket.emit('disconnect');
+  	//if (!this.parentSocket) {
+  		//this.socket.close();
+  	//} else {
+  		//this.socket.onmessage = this.parentOnmessage;
+  	//}
+  };
+})(window);
